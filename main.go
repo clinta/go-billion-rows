@@ -2,10 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -27,7 +28,7 @@ func processFile(filePath string) error {
 	fileScanner := bufio.NewScanner(readFile)
 	fileScanner.Split(bufio.ScanLines)
 	for fileScanner.Scan() {
-		results.update(fileScanner.Text())
+		results.update(fileScanner.Bytes())
 	}
 	if err := readFile.Close(); err != nil {
 		return err
@@ -37,16 +38,19 @@ func processFile(filePath string) error {
 	return nil
 }
 
-type results map[string]*stationSummary
+const MAX_NAME = 32
+
+type results map[[MAX_NAME]byte]*stationSummary
 
 func newResults() results {
-	return make(map[string]*stationSummary)
+	return make(map[[MAX_NAME]byte]*stationSummary)
 }
 
-func (r results) update(line string) error {
-	elems := strings.SplitN(line, ";", 2)
-	name := elems[0]
-	temp, err := strconv.ParseFloat(elems[1], 32)
+func (r results) update(line []byte) error {
+	elems := bytes.SplitN(line, []byte(";"), 2)
+	var name [MAX_NAME]byte
+	copy(name[:], elems[0])
+	temp, err := strconv.ParseFloat(string(elems[1]), 32)
 	if err != nil {
 		return err
 	}
@@ -63,15 +67,20 @@ func (r results) update(line string) error {
 }
 
 func (r results) summarize() string {
-	keys := make([]string, 0, len(r))
-	for name := range r {
-		keys = append(keys, name)
+	type stationResult struct {
+		result *stationSummary
+		name   string
 	}
-	sort.Strings(keys)
+
+	vals := make([]stationResult, 0, len(r))
+	for name, summary := range r {
+		vals = append(vals, stationResult{name: string(bytes.Trim(name[:], "\x00")), result: summary})
+	}
+	slices.SortFunc(vals, func(a, b stationResult) int { return strings.Compare(a.name, b.name) })
 
 	summaries := make([]string, 0, len(r))
-	for _, k := range keys {
-		summaries = append(summaries, fmt.Sprintf("%s=%s", k, r[k].summarize()))
+	for _, v := range vals {
+		summaries = append(summaries, fmt.Sprintf("%s=%s", v.name, v.result.summarize()))
 	}
 
 	return fmt.Sprintf("{%s}\n", strings.Join(summaries, ", "))
