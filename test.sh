@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
+SOURCE_SUFFIX=".full"
 BRC_TEST_DIR="${HOME}/src/github.com/gunnarmorling/1brc"
-SOURCE_FILE="${BRC_TEST_DIR}/measurements.txt"
-SOURCE_RESULTS="${BRC_TEST_DIR}/results.txt"
+SOURCE_FILE="${BRC_TEST_DIR}/measurements.txt${SOURCE_SUFFIX}"
+SOURCE_RESULTS="${BRC_TEST_DIR}/results.txt${SOURCE_SUFFIX}"
 OUT_RESULTS="/tmp/go-billion-rows-results.txt"
 OUT_TIME="/tmp/go-billion-rows-time"
 

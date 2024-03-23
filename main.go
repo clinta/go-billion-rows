@@ -6,12 +6,23 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/pprof"
 	"slices"
-	"strconv"
 	"strings"
 )
 
 func main() {
+	f, err := os.Create("cpu_profile.prof")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	if err := pprof.StartCPUProfile(f); err != nil {
+		panic(err)
+	}
+	defer pprof.StopCPUProfile()
+
 	if err := processFile(os.Args[1]); err != nil {
 		log.Fatal(err)
 	}
@@ -46,14 +57,56 @@ func newResults() results {
 	return make(map[[MAX_NAME]byte]*stationSummary)
 }
 
+func tempToInt(temp []byte) int64 {
+	var sign int64 = 1
+	if temp[0] == byte('-') {
+		sign = -1
+		temp = temp[1:]
+	}
+
+	var r int64 = 0
+	for _, b := range temp {
+		if b == byte('.') {
+			continue
+		}
+		r = r * 10
+		r += int64(b - '0')
+	}
+
+	r = r * sign
+	return r
+}
+
+func fmtTemp(temp int64) string {
+	whole := temp / 10
+	frac := temp % 10
+	sign := ""
+	if frac < 0 {
+		frac = -frac
+		if whole == 0 {
+			sign = "-"
+		}
+	}
+	return fmt.Sprintf("%s%d.%d", sign, whole, frac)
+}
+
+func divTemp(numerator, denominator int64) string {
+	n := numerator / denominator
+	r := numerator * 10 / denominator % 10
+	if r >= 5 {
+		n += 1
+	}
+	if r < -5 {
+		n -= 1
+	}
+	return fmtTemp(n)
+}
+
 func (r results) update(line []byte) error {
 	elems := bytes.SplitN(line, []byte(";"), 2)
 	var name [MAX_NAME]byte
 	copy(name[:], elems[0])
-	temp, err := strconv.ParseFloat(string(elems[1]), 32)
-	if err != nil {
-		return err
-	}
+	temp := tempToInt(elems[1])
 
 	summary, ok := r[name]
 	if !ok {
@@ -87,17 +140,17 @@ func (r results) summarize() string {
 }
 
 type stationSummary struct {
-	min   float64
-	max   float64
-	count int32
-	sum   float64
+	min   int64
+	max   int64
+	count int64
+	sum   int64
 }
 
-func newStationSummary(temp float64) *stationSummary {
+func newStationSummary(temp int64) *stationSummary {
 	return &stationSummary{temp, temp, 1, temp}
 }
 
-func (s *stationSummary) addTemp(temp float64) {
+func (s *stationSummary) addTemp(temp int64) {
 	s.count += 1
 	s.sum += temp
 
@@ -111,6 +164,5 @@ func (s *stationSummary) addTemp(temp float64) {
 }
 
 func (s *stationSummary) summarize() string {
-	mean := s.sum / float64(s.count)
-	return fmt.Sprintf("%.1f/%.1f/%.1f", s.min, mean, s.max)
+	return fmt.Sprintf("%s/%s/%s", fmtTemp(s.min), divTemp(s.sum, s.count), fmtTemp(s.max))
 }
