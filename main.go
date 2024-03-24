@@ -17,13 +17,15 @@ import (
 	//_ "net/http/pprof"
 )
 
-const READER_WORKERS = 16
+const (
+	READER_WORKERS          = 16
+	WRITER_WORKERS          = 4
+	RECORD_CHAN_BUFFER_SIZE = 16
+	NAME_BUFFERS            = (RECORD_CHAN_BUFFER_SIZE + 2) * WRITER_WORKERS * READER_WORKERS
+	NAME_BUFFER_CAP         = 32
+)
 
 func main() {
-	//go func() {
-	//	log.Println(http.ListenAndServe("localhost:6060", nil))
-	//}()
-
 	f, err := os.Create("cpu_profile.prof")
 	if err != nil {
 		panic(err)
@@ -59,7 +61,16 @@ func processFile(filePath string) error {
 	var start int64 = 0
 	stop := secSize
 
-	eg := new(errgroup.Group)
+	writerWg := sync.WaitGroup{}
+	for w := range WRITER_WORKERS {
+		writerWg.Add(1)
+		go func() {
+			results.write(w)
+			writerWg.Done()
+		}()
+	}
+
+	ReaderErrGroup := new(errgroup.Group)
 	for range READER_WORKERS {
 		{
 			readFile.Seek(stop, io.SeekStart)
@@ -80,31 +91,50 @@ func processFile(filePath string) error {
 
 		secReader := bufio.NewReader(io.NewSectionReader(readFile, start, stop-start))
 
-		eg.Go(func() error {
+		ReaderErrGroup.Go(func() error {
 			return results.read(secReader)
 		})
 		start = stop + 1
 		stop = start + secSize
 	}
 
-	if err := eg.Wait(); err != nil {
+	if err := ReaderErrGroup.Wait(); err != nil {
 		return err
 	}
+
+	for _, ch := range results.recordCh {
+		// Readers will read remaining values when channel is closed apparently
+		close(ch)
+	}
+
+	writerWg.Wait()
 
 	fmt.Print(results.summarize())
 	return err
 }
 
 type results struct {
-	m map[uint64]*stationSummary
-	l sync.RWMutex
+	recordCh  [WRITER_WORKERS]chan *record
+	bufferCh  chan []byte
+	summaries [WRITER_WORKERS]map[uint64]*stationSummary
 }
 
 func newResults() *results {
-	return &results{
-		m: make(map[uint64]*stationSummary),
-		l: sync.RWMutex{},
+	r := &results{}
+	for i := range r.recordCh {
+		r.recordCh[i] = make(chan *record, RECORD_CHAN_BUFFER_SIZE)
 	}
+	for i := range r.summaries {
+		r.summaries[i] = make(map[uint64]*stationSummary)
+	}
+	r.bufferCh = make(chan []byte, NAME_BUFFERS*2)
+	go func() {
+		for range NAME_BUFFERS {
+			r.bufferCh <- make([]byte, 0, NAME_BUFFER_CAP)
+		}
+	}()
+
+	return r
 }
 
 type temperatureBuilder [2]int16
@@ -161,23 +191,32 @@ func (t temperature) div(d int64) temperature {
 	return temperature(a)
 }
 
-func (r *results) addTemp(name []byte, nameHashSum uint64, temp temperature) {
-	r.l.RLock()
-	summary, ok := r.m[nameHashSum]
-	if !ok {
-		r.l.RUnlock()
-		r.l.Lock()
-		summary, ok := r.m[nameHashSum]
+type record struct {
+	name        []byte
+	nameHashSum uint64
+	temp        temperature
+}
+
+func newRecord(name []byte, nameHashSum uint64, temp temperature) *record {
+	return &record{name, nameHashSum, temp}
+}
+
+func (r *results) write(worker_number int) {
+	ch := r.recordCh[worker_number]
+	summaries := r.summaries[worker_number]
+	for record := range ch {
+		summary, ok := summaries[record.nameHashSum]
 		if !ok {
-			summary = newStationSummary(string(name), temp)
-			r.m[nameHashSum] = summary
-		} else {
-			summary.addTemp(temp)
+			summary = newStationSummary(string(record.name), record.temp)
+			summaries[record.nameHashSum] = summary
+			r.bufferCh <- record.name
+			continue
 		}
-		r.l.Unlock()
-	} else {
-		summary.addTemp(temp)
-		r.l.RUnlock()
+		if summary.name != string(record.name) {
+			log.Printf("WTF! hash: %d, sum name: %s, name %s\n", record.nameHashSum, summary.name, string(record.name))
+		}
+		summary.addTemp(record.temp)
+		r.bufferCh <- record.name
 	}
 }
 
@@ -185,25 +224,27 @@ var HASH_SEED = maphash.MakeSeed()
 
 func (r *results) read(fileReader io.ByteReader) error {
 	temp := newTemperatureBuilder()
-	name := make([]byte, 0, 32)
 	nameHash := maphash.Hash{}
 	nameHash.SetSeed(HASH_SEED)
 	var nameHashSum uint64 = 0
 	b, err := fileReader.ReadByte()
 
 	reset := func() {
-		name = name[:0]
 		temp.reset()
 		nameHash.Reset()
+		nameHashSum = 0
 	}
 
 	for err == nil {
+		name := <-r.bufferCh
+		name = name[:0]
+		reset()
+
 		for err == nil && b != ';' {
 			name = append(name, b)
 			nameHash.WriteByte(b)
 			b, err = fileReader.ReadByte()
 		}
-
 		// b is currently ';', get the next byte
 		b, err = fileReader.ReadByte()
 
@@ -214,9 +255,9 @@ func (r *results) read(fileReader io.ByteReader) error {
 		}
 
 		nameHashSum = nameHash.Sum64()
-		r.addTemp(name, nameHashSum, temp.temperature())
+		worker := nameHashSum % WRITER_WORKERS
+		r.recordCh[worker] <- newRecord(name, nameHashSum, temp.temperature())
 
-		reset()
 		b, err = fileReader.ReadByte()
 	}
 
@@ -232,15 +273,15 @@ func (r *results) summarize() string {
 		name   string
 	}
 
-	r.l.RLock()
-	defer r.l.RUnlock()
-	vals := make([]stationResult, 0, len(r.m))
-	for _, summary := range r.m {
-		vals = append(vals, stationResult{name: summary.name, result: summary})
+	vals := make([]stationResult, 0)
+	for _, summaries := range r.summaries {
+		for _, summary := range summaries {
+			vals = append(vals, stationResult{name: summary.name, result: summary})
+		}
 	}
 	slices.SortFunc(vals, func(a, b stationResult) int { return strings.Compare(a.name, b.name) })
 
-	summaries := make([]string, 0, len(r.m))
+	summaries := make([]string, 0, len(vals))
 	for _, v := range vals {
 		summaries = append(summaries, fmt.Sprintf("%s=%s", v.name, v.result.summarize()))
 	}
