@@ -3,3 +3,4 @@ started,commit,valid results,elapsed time,percent cpu,resident memory,kernel tim
 2024-03-23T18:13:39-04:00,4cfa147 use bytes in map,true,298.39,102%,10544,9.69,297.06,33076,252861,0,35385
 2024-03-23T20:22:40-04:00,41bda13 Use ints instead of floats,true,286.81,102%,10508,9.73,285.00,45099,251888,0,39673
 2024-03-23T21:29:49-04:00,b1cc043 Use ints instead of floats,true,232.31,107%,10316,11.61,237.87,41183,383779,0,54753
+2024-03-23T21:40:04-04:00,5ddcf88 don't use bytes split,true,77.61,99%,5956,4.32,72.93,6680,19830,0,385
