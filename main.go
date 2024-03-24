@@ -48,7 +48,7 @@ func newResults() results {
 	return make(map[uint64]*stationSummary)
 }
 
-func tempToInt(temp []byte) int64 {
+func tempBytesToInt(temp []byte) int64 {
 	var sign int64 = 1
 	if temp[0] == byte('-') {
 		sign = -1
@@ -102,29 +102,39 @@ func (r results) readFile(filePath string) error {
 	}
 
 	fileReader := bufio.NewReader(readFile)
-	var tempBytes []byte
+	tempBytes := make([]byte, 0, 5)
 	var temp int64
-	name, err := fileReader.ReadBytes(';')
+	name := make([]byte, 0, 32)
+	nameHash := maphash.Hash{}
+	b, err := fileReader.ReadByte()
 	for err == nil {
-		name = name[0 : len(name)-1]
-		nameHash := maphash.Bytes(HASH_SEED, name)
-
-		tempBytes, err = fileReader.ReadBytes('\n')
-		if err != nil && err != io.EOF {
-			break
+		for err == nil && b != ';' {
+			name = append(name, b)
+			nameHash.WriteByte(b)
+			b, err = fileReader.ReadByte()
 		}
-		tempBytes = tempBytes[0 : len(tempBytes)-1]
-		temp = tempToInt(tempBytes)
 
-		summary, ok := r[nameHash]
+		// b is currently ';', get the next byte
+		b, err = fileReader.ReadByte()
+		for err == nil && b != '\n' {
+			tempBytes = append(tempBytes, b)
+			b, err = fileReader.ReadByte()
+		}
+		temp = tempBytesToInt(tempBytes)
+
+		nameHashSum := nameHash.Sum64()
+		summary, ok := r[nameHashSum]
 		if !ok {
 			summary = newStationSummary(string(name), temp)
-			r[nameHash] = summary
+			r[nameHashSum] = summary
 		} else {
 			summary.addTemp(temp)
 		}
 
-		name, err = fileReader.ReadBytes(';')
+		name = name[:0]
+		tempBytes = tempBytes[:0]
+		nameHash.Reset()
+		b, err = fileReader.ReadByte()
 	}
 
 	if err == io.EOF {
