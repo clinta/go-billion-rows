@@ -103,10 +103,17 @@ func divTemp(numerator, denominator int64) string {
 }
 
 func (r results) update(line []byte) error {
-	elems := bytes.SplitN(line, []byte(";"), 2)
 	var name [MAX_NAME]byte
-	copy(name[:], elems[0])
-	temp := tempToInt(elems[1])
+	delim := 0
+	for i, b := range line {
+		if b == byte(';') {
+			delim = i
+			break
+		}
+		name[i] = b
+	}
+
+	temp := tempToInt(line[delim+1:])
 
 	summary, ok := r[name]
 	if !ok {
