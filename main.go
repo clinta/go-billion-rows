@@ -17,7 +17,7 @@ import (
 	//_ "net/http/pprof"
 )
 
-const WORKERS = 2
+const WORKERS = 16
 
 func main() {
 	//go func() {
