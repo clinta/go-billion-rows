@@ -12,9 +12,18 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/sync/errgroup"
+	//_ "net/http/pprof"
 )
 
+const WORKERS = 2
+
 func main() {
+	//go func() {
+	//	log.Println(http.ListenAndServe("localhost:6060", nil))
+	//}()
+
 	f, err := os.Create("cpu_profile.prof")
 	if err != nil {
 		panic(err)
@@ -38,19 +47,53 @@ func processFile(filePath string) error {
 	if err != nil {
 		return err
 	}
+	defer readFile.Close()
 
-	fileReader := bufio.NewReader(readFile)
-
-	if err := results.read(fileReader); err != nil {
+	stat, err := readFile.Stat()
+	if err != nil {
 		return err
 	}
-	err = readFile.Close()
+	fileSize := stat.Size()
+	secSize := fileSize / WORKERS
+
+	var start int64 = 0
+	stop := secSize
+
+	eg := new(errgroup.Group)
+	for range WORKERS {
+		{
+			readFile.Seek(stop, io.SeekStart)
+			findDelimReader := bufio.NewReader(readFile)
+			b, err := findDelimReader.ReadByte()
+			for b != '\n' && err == nil {
+				stop += 1
+				b, err = findDelimReader.ReadByte()
+			}
+			if err == io.EOF {
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+			readFile.Seek(0, io.SeekStart)
+		}
+
+		secReader := bufio.NewReader(io.NewSectionReader(readFile, start, stop))
+
+		eg.Go(func() error {
+			return results.read(secReader)
+		})
+		start = stop + 1
+		stop = start + secSize
+	}
+
+	if err := eg.Wait(); err != nil {
+		return err
+	}
 
 	fmt.Print(results.summarize())
 	return err
 }
-
-const MAX_NAME = 32
 
 type results struct {
 	m map[uint64]*stationSummary
@@ -142,11 +185,14 @@ func (r *results) addTemp(name []byte, nameHashSum uint64, temperature int64) {
 	}
 }
 
+var HASH_SEED = maphash.MakeSeed()
+
 func (r *results) read(fileReader io.ByteReader) error {
 	var temperature int64 = 0
 	var tempSign int64 = 1
 	name := make([]byte, 0, 32)
 	nameHash := maphash.Hash{}
+	nameHash.SetSeed(HASH_SEED)
 	var nameHashSum uint64 = 0
 	b, err := fileReader.ReadByte()
 
