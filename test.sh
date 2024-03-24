@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 SOURCE_SUFFIX=".full"
+#SOURCE_SUFFIX=".small"
 BRC_TEST_DIR="${HOME}/src/github.com/gunnarmorling/1brc"
 SOURCE_FILE="${BRC_TEST_DIR}/measurements.txt${SOURCE_SUFFIX}"
 SOURCE_RESULTS="${BRC_TEST_DIR}/results.txt${SOURCE_SUFFIX}"

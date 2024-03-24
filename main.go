@@ -2,9 +2,9 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"hash/maphash"
+	"io"
 	"log"
 	"os"
 	"runtime/pprof"
@@ -30,19 +30,9 @@ func main() {
 }
 
 func processFile(filePath string) error {
-	readFile, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-
 	results := newResults()
 
-	fileScanner := bufio.NewScanner(readFile)
-	fileScanner.Split(bufio.ScanLines)
-	for fileScanner.Scan() {
-		results.update(fileScanner.Bytes())
-	}
-	if err := readFile.Close(); err != nil {
+	if err := results.readFile(filePath); err != nil {
 		return err
 	}
 
@@ -105,21 +95,47 @@ func divTemp(numerator, denominator int64) string {
 
 var HASH_SEED = maphash.MakeSeed()
 
-func (r results) update(line []byte) error {
-	delim := bytes.Index(line, []byte{byte(';')})
-	nameHash := maphash.Bytes(HASH_SEED, line[:delim])
-
-	temp := tempToInt(line[delim+1:])
-
-	summary, ok := r[nameHash]
-	if !ok {
-		summary = newStationSummary(string(line[:delim]), temp)
-		r[nameHash] = summary
-		return nil
+func (r results) readFile(filePath string) error {
+	readFile, err := os.Open(filePath)
+	if err != nil {
+		return err
 	}
-	summary.addTemp(temp)
 
-	return nil
+	fileReader := bufio.NewReader(readFile)
+	var tempBytes []byte
+	var temp int64
+	name, err := fileReader.ReadBytes(';')
+	for err == nil {
+		name = name[0 : len(name)-1]
+		nameHash := maphash.Bytes(HASH_SEED, name)
+
+		tempBytes, err = fileReader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			break
+		}
+		tempBytes = tempBytes[0 : len(tempBytes)-1]
+		temp = tempToInt(tempBytes)
+
+		summary, ok := r[nameHash]
+		if !ok {
+			summary = newStationSummary(string(name), temp)
+			r[nameHash] = summary
+		} else {
+			summary.addTemp(temp)
+		}
+
+		name, err = fileReader.ReadBytes(';')
+	}
+
+	if err == io.EOF {
+		err = nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	return readFile.Close()
 }
 
 func (r results) summarize() string {
