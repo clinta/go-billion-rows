@@ -93,7 +93,28 @@ func divTemp(numerator, denominator int64) string {
 	return fmtTemp(n)
 }
 
-var HASH_SEED = maphash.MakeSeed()
+func addTempByte(b byte, temperature int64, tempSign int64) (int64, int64) {
+	if b == '-' {
+		tempSign = -1
+		return temperature, tempSign
+	}
+	if b == '.' {
+		return temperature, tempSign
+	}
+	temperature = temperature * 10
+	temperature += int64(b - '0')
+	return temperature, tempSign
+}
+
+func (r results) addTemp(name []byte, nameHashSum uint64, temperature int64) {
+	summary, ok := r[nameHashSum]
+	if !ok {
+		summary = newStationSummary(string(name), temperature)
+		r[nameHashSum] = summary
+	} else {
+		summary.addTemp(temperature)
+	}
+}
 
 func (r results) readFile(filePath string) error {
 	readFile, err := os.Open(filePath)
@@ -102,11 +123,20 @@ func (r results) readFile(filePath string) error {
 	}
 
 	fileReader := bufio.NewReader(readFile)
-	tempBytes := make([]byte, 0, 5)
-	var temp int64
+	var temperature int64 = 0
+	var tempSign int64 = 1
 	name := make([]byte, 0, 32)
 	nameHash := maphash.Hash{}
+	var nameHashSum uint64 = 0
 	b, err := fileReader.ReadByte()
+
+	reset := func() {
+		name = name[:0]
+		temperature = 0
+		tempSign = 1
+		nameHash.Reset()
+	}
+
 	for err == nil {
 		for err == nil && b != ';' {
 			name = append(name, b)
@@ -116,24 +146,18 @@ func (r results) readFile(filePath string) error {
 
 		// b is currently ';', get the next byte
 		b, err = fileReader.ReadByte()
+
+		// Read the temperature value
 		for err == nil && b != '\n' {
-			tempBytes = append(tempBytes, b)
+			temperature, tempSign = addTempByte(b, temperature, tempSign)
 			b, err = fileReader.ReadByte()
 		}
-		temp = tempBytesToInt(tempBytes)
+		temperature = temperature * tempSign
 
-		nameHashSum := nameHash.Sum64()
-		summary, ok := r[nameHashSum]
-		if !ok {
-			summary = newStationSummary(string(name), temp)
-			r[nameHashSum] = summary
-		} else {
-			summary.addTemp(temp)
-		}
+		nameHashSum = nameHash.Sum64()
+		r.addTemp(name, nameHashSum, temperature)
 
-		name = name[:0]
-		tempBytes = tempBytes[:0]
-		nameHash.Reset()
+		reset()
 		b, err = fileReader.ReadByte()
 	}
 

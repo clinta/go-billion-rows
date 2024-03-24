@@ -8,7 +8,7 @@ SOURCE_RESULTS="${BRC_TEST_DIR}/results.txt${SOURCE_SUFFIX}"
 OUT_RESULTS="/tmp/go-billion-rows-results.txt"
 OUT_TIME="/tmp/go-billion-rows-time"
 
-go build .
+go build -gcflags=-l=4 .
 commit=$(git log --pretty=oneline --abbrev-commit -1)
 started=$(date --iso-8601=seconds)
 # elapsed time, percent cpu, resident memory, kernel time, user time, involuntary ctx switch, voluntary ctx switch, major page faults, minor page faults
