@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"hash/maphash"
 	"log"
 	"os"
 	"runtime/pprof"
@@ -51,10 +52,10 @@ func processFile(filePath string) error {
 
 const MAX_NAME = 32
 
-type results map[[MAX_NAME]byte]*stationSummary
+type results map[uint64]*stationSummary
 
 func newResults() results {
-	return make(map[[MAX_NAME]byte]*stationSummary)
+	return make(map[uint64]*stationSummary)
 }
 
 func tempToInt(temp []byte) int64 {
@@ -102,23 +103,18 @@ func divTemp(numerator, denominator int64) string {
 	return fmtTemp(n)
 }
 
+var HASH_SEED = maphash.MakeSeed()
+
 func (r results) update(line []byte) error {
-	var name [MAX_NAME]byte
-	delim := 0
-	for i, b := range line {
-		if b == byte(';') {
-			delim = i
-			break
-		}
-		name[i] = b
-	}
+	delim := bytes.Index(line, []byte{byte(';')})
+	nameHash := maphash.Bytes(HASH_SEED, line[:delim])
 
 	temp := tempToInt(line[delim+1:])
 
-	summary, ok := r[name]
+	summary, ok := r[nameHash]
 	if !ok {
-		summary = newStationSummary(temp)
-		r[name] = summary
+		summary = newStationSummary(string(line[:delim]), temp)
+		r[nameHash] = summary
 		return nil
 	}
 	summary.addTemp(temp)
@@ -133,8 +129,8 @@ func (r results) summarize() string {
 	}
 
 	vals := make([]stationResult, 0, len(r))
-	for name, summary := range r {
-		vals = append(vals, stationResult{name: string(bytes.Trim(name[:], "\x00")), result: summary})
+	for _, summary := range r {
+		vals = append(vals, stationResult{name: summary.name, result: summary})
 	}
 	slices.SortFunc(vals, func(a, b stationResult) int { return strings.Compare(a.name, b.name) })
 
@@ -147,14 +143,15 @@ func (r results) summarize() string {
 }
 
 type stationSummary struct {
+	name  string
 	min   int64
 	max   int64
 	count int64
 	sum   int64
 }
 
-func newStationSummary(temp int64) *stationSummary {
-	return &stationSummary{temp, temp, 1, temp}
+func newStationSummary(name string, temp int64) *stationSummary {
+	return &stationSummary{name, temp, temp, 1, temp}
 }
 
 func (s *stationSummary) addTemp(temp int64) {
