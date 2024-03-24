@@ -10,6 +10,8 @@ import (
 	"runtime/pprof"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 func main() {
@@ -32,20 +34,34 @@ func main() {
 func processFile(filePath string) error {
 	results := newResults()
 
-	if err := results.readFile(filePath); err != nil {
+	readFile, err := os.Open(filePath)
+	if err != nil {
 		return err
 	}
 
+	fileReader := bufio.NewReader(readFile)
+
+	if err := results.read(fileReader); err != nil {
+		return err
+	}
+	err = readFile.Close()
+
 	fmt.Print(results.summarize())
-	return nil
+	return err
 }
 
 const MAX_NAME = 32
 
-type results map[uint64]*stationSummary
+type results struct {
+	m map[uint64]*stationSummary
+	l sync.RWMutex
+}
 
-func newResults() results {
-	return make(map[uint64]*stationSummary)
+func newResults() *results {
+	return &results{
+		m: make(map[uint64]*stationSummary),
+		l: sync.RWMutex{},
+	}
 }
 
 func tempBytesToInt(temp []byte) int64 {
@@ -106,23 +122,27 @@ func addTempByte(b byte, temperature int64, tempSign int64) (int64, int64) {
 	return temperature, tempSign
 }
 
-func (r results) addTemp(name []byte, nameHashSum uint64, temperature int64) {
-	summary, ok := r[nameHashSum]
+func (r *results) addTemp(name []byte, nameHashSum uint64, temperature int64) {
+	r.l.RLock()
+	summary, ok := r.m[nameHashSum]
 	if !ok {
-		summary = newStationSummary(string(name), temperature)
-		r[nameHashSum] = summary
+		r.l.RUnlock()
+		r.l.Lock()
+		summary, ok := r.m[nameHashSum]
+		if !ok {
+			summary = newStationSummary(string(name), temperature)
+			r.m[nameHashSum] = summary
+		} else {
+			summary.addTemp(temperature)
+		}
+		r.l.Unlock()
 	} else {
 		summary.addTemp(temperature)
+		r.l.RUnlock()
 	}
 }
 
-func (r results) readFile(filePath string) error {
-	readFile, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-
-	fileReader := bufio.NewReader(readFile)
+func (r *results) read(fileReader io.ByteReader) error {
 	var temperature int64 = 0
 	var tempSign int64 = 1
 	name := make([]byte, 0, 32)
@@ -164,27 +184,24 @@ func (r results) readFile(filePath string) error {
 	if err == io.EOF {
 		err = nil
 	}
-
-	if err != nil {
-		return err
-	}
-
-	return readFile.Close()
+	return err
 }
 
-func (r results) summarize() string {
+func (r *results) summarize() string {
 	type stationResult struct {
 		result *stationSummary
 		name   string
 	}
 
-	vals := make([]stationResult, 0, len(r))
-	for _, summary := range r {
+	r.l.RLock()
+	defer r.l.RUnlock()
+	vals := make([]stationResult, 0, len(r.m))
+	for _, summary := range r.m {
 		vals = append(vals, stationResult{name: summary.name, result: summary})
 	}
 	slices.SortFunc(vals, func(a, b stationResult) int { return strings.Compare(a.name, b.name) })
 
-	summaries := make([]string, 0, len(r))
+	summaries := make([]string, 0, len(r.m))
 	for _, v := range vals {
 		summaries = append(summaries, fmt.Sprintf("%s=%s", v.name, v.result.summarize()))
 	}
@@ -194,29 +211,45 @@ func (r results) summarize() string {
 
 type stationSummary struct {
 	name  string
-	min   int64
-	max   int64
-	count int64
-	sum   int64
+	min   atomic.Int64
+	max   atomic.Int64
+	count atomic.Int64
+	sum   atomic.Int64
 }
 
 func newStationSummary(name string, temp int64) *stationSummary {
-	return &stationSummary{name, temp, temp, 1, temp}
+	s := &stationSummary{}
+	s.name = name
+	s.min.Store(temp)
+	s.max.Store(temp)
+	s.count.Store(1)
+	s.sum.Store(temp)
+	return s
 }
 
 func (s *stationSummary) addTemp(temp int64) {
-	s.count += 1
-	s.sum += temp
+	s.count.Add(1)
+	s.sum.Add(temp)
 
-	if temp < s.min {
-		s.min = temp
+	old := s.min.Load()
+	swapped := false
+	for temp < old && !swapped {
+		swapped = s.min.CompareAndSwap(old, temp)
+		if !swapped {
+			old = s.min.Load()
+		}
 	}
 
-	if temp > s.max {
-		s.max = temp
+	old = s.max.Load()
+	swapped = false
+	for temp > old && !swapped {
+		swapped = s.max.CompareAndSwap(old, temp)
+		if !swapped {
+			old = s.max.Load()
+		}
 	}
 }
 
 func (s *stationSummary) summarize() string {
-	return fmt.Sprintf("%s/%s/%s", fmtTemp(s.min), divTemp(s.sum, s.count), fmtTemp(s.max))
+	return fmt.Sprintf("%s/%s/%s", fmtTemp(s.min.Load()), divTemp(s.sum.Load(), s.count.Load()), fmtTemp(s.max.Load()))
 }
