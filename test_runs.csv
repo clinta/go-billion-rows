@@ -8,3 +8,4 @@ started,commit,valid results,elapsed time,percent cpu,resident memory,kernel tim
 2024-03-24T00:33:20-04:00,1746cb5 loop over each byte myself,true,98.03,99%,6092,3.76,94.01,12532,23087,0,384
 2024-03-24T01:15:56-04:00,a1eb83b improve temp reading by doing it with the bytes from reader,true,91.65,99%,8068,3.25,88.35,3338,22098,0,340
 2024-03-24T11:01:40-04:00,c2573ad start multi-threading, two threads,true,153.58,197%,6300,4.48,298.97,31564,45790,0,434
+2024-03-24T11:34:21-04:00,f25aa84 fix section reader,true,128.35,198%,6040,4.61,250.74,16813,37776,0,391
