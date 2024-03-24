@@ -17,7 +17,7 @@ import (
 	//_ "net/http/pprof"
 )
 
-const WORKERS = 16
+const READER_WORKERS = 16
 
 func main() {
 	//go func() {
@@ -54,13 +54,13 @@ func processFile(filePath string) error {
 		return err
 	}
 	fileSize := stat.Size()
-	secSize := fileSize / WORKERS
+	secSize := fileSize / READER_WORKERS
 
 	var start int64 = 0
 	stop := secSize
 
 	eg := new(errgroup.Group)
-	for range WORKERS {
+	for range READER_WORKERS {
 		{
 			readFile.Seek(stop, io.SeekStart)
 			findDelimReader := bufio.NewReader(readFile)
@@ -107,29 +107,37 @@ func newResults() *results {
 	}
 }
 
-func tempBytesToInt(temp []byte) int64 {
-	var sign int64 = 1
-	if temp[0] == byte('-') {
-		sign = -1
-		temp = temp[1:]
-	}
+type temperatureBuilder [2]int16
 
-	var r int64 = 0
-	for _, b := range temp {
-		if b == byte('.') {
-			continue
-		}
-		r = r * 10
-		r += int64(b - '0')
-	}
-
-	r = r * sign
-	return r
+func newTemperatureBuilder() temperatureBuilder {
+	return temperatureBuilder{0, 1}
 }
 
-func fmtTemp(temp int64) string {
-	whole := temp / 10
-	frac := temp % 10
+func (t *temperatureBuilder) reset() {
+	t[0] = 0
+	t[1] = 1
+}
+
+func (t *temperatureBuilder) addByte(b byte) {
+	if b == '-' {
+		t[1] = t[1] * -1
+		return
+	}
+	if b == '.' {
+		return
+	}
+	t[0] = (t[0] * 10) + int16(b-'0')
+}
+
+func (t *temperatureBuilder) temperature() temperature {
+	return temperature(int64(t[0]) * int64(t[1]))
+}
+
+type temperature int64
+
+func (t temperature) string() string {
+	whole := t / 10
+	frac := t % 10
 	sign := ""
 	if frac < 0 {
 		frac = -frac
@@ -140,32 +148,20 @@ func fmtTemp(temp int64) string {
 	return fmt.Sprintf("%s%d.%d", sign, whole, frac)
 }
 
-func divTemp(numerator, denominator int64) string {
-	n := numerator / denominator
-	r := numerator * 10 / denominator % 10
+func (t temperature) div(d int64) temperature {
+	n := int64(t)
+	a := n / d
+	r := n * 10 / d % 10
 	if r >= 5 {
-		n += 1
+		a += 1
 	}
 	if r < -5 {
-		n -= 1
+		a -= 1
 	}
-	return fmtTemp(n)
+	return temperature(a)
 }
 
-func addTempByte(b byte, temperature int64, tempSign int64) (int64, int64) {
-	if b == '-' {
-		tempSign = -1
-		return temperature, tempSign
-	}
-	if b == '.' {
-		return temperature, tempSign
-	}
-	temperature = temperature * 10
-	temperature += int64(b - '0')
-	return temperature, tempSign
-}
-
-func (r *results) addTemp(name []byte, nameHashSum uint64, temperature int64) {
+func (r *results) addTemp(name []byte, nameHashSum uint64, temp temperature) {
 	r.l.RLock()
 	summary, ok := r.m[nameHashSum]
 	if !ok {
@@ -173,14 +169,14 @@ func (r *results) addTemp(name []byte, nameHashSum uint64, temperature int64) {
 		r.l.Lock()
 		summary, ok := r.m[nameHashSum]
 		if !ok {
-			summary = newStationSummary(string(name), temperature)
+			summary = newStationSummary(string(name), temp)
 			r.m[nameHashSum] = summary
 		} else {
-			summary.addTemp(temperature)
+			summary.addTemp(temp)
 		}
 		r.l.Unlock()
 	} else {
-		summary.addTemp(temperature)
+		summary.addTemp(temp)
 		r.l.RUnlock()
 	}
 }
@@ -188,8 +184,7 @@ func (r *results) addTemp(name []byte, nameHashSum uint64, temperature int64) {
 var HASH_SEED = maphash.MakeSeed()
 
 func (r *results) read(fileReader io.ByteReader) error {
-	var temperature int64 = 0
-	var tempSign int64 = 1
+	temp := newTemperatureBuilder()
 	name := make([]byte, 0, 32)
 	nameHash := maphash.Hash{}
 	nameHash.SetSeed(HASH_SEED)
@@ -198,8 +193,7 @@ func (r *results) read(fileReader io.ByteReader) error {
 
 	reset := func() {
 		name = name[:0]
-		temperature = 0
-		tempSign = 1
+		temp.reset()
 		nameHash.Reset()
 	}
 
@@ -215,13 +209,12 @@ func (r *results) read(fileReader io.ByteReader) error {
 
 		// Read the temperature value
 		for err == nil && b != '\n' {
-			temperature, tempSign = addTempByte(b, temperature, tempSign)
+			temp.addByte(b)
 			b, err = fileReader.ReadByte()
 		}
-		temperature = temperature * tempSign
 
 		nameHashSum = nameHash.Sum64()
-		r.addTemp(name, nameHashSum, temperature)
+		r.addTemp(name, nameHashSum, temp.temperature())
 
 		reset()
 		b, err = fileReader.ReadByte()
@@ -263,24 +256,26 @@ type stationSummary struct {
 	sum   atomic.Int64
 }
 
-func newStationSummary(name string, temp int64) *stationSummary {
+func newStationSummary(name string, temp temperature) *stationSummary {
+	tempNum := int64(temp)
 	s := &stationSummary{}
 	s.name = name
-	s.min.Store(temp)
-	s.max.Store(temp)
+	s.min.Store(tempNum)
+	s.max.Store(tempNum)
 	s.count.Store(1)
-	s.sum.Store(temp)
+	s.sum.Store(tempNum)
 	return s
 }
 
-func (s *stationSummary) addTemp(temp int64) {
+func (s *stationSummary) addTemp(temp temperature) {
+	tempVal := int64(temp)
 	s.count.Add(1)
-	s.sum.Add(temp)
+	s.sum.Add(tempVal)
 
 	old := s.min.Load()
 	swapped := false
-	for temp < old && !swapped {
-		swapped = s.min.CompareAndSwap(old, temp)
+	for tempVal < old && !swapped {
+		swapped = s.min.CompareAndSwap(old, tempVal)
 		if !swapped {
 			old = s.min.Load()
 		}
@@ -288,8 +283,8 @@ func (s *stationSummary) addTemp(temp int64) {
 
 	old = s.max.Load()
 	swapped = false
-	for temp > old && !swapped {
-		swapped = s.max.CompareAndSwap(old, temp)
+	for tempVal > old && !swapped {
+		swapped = s.max.CompareAndSwap(old, tempVal)
 		if !swapped {
 			old = s.max.Load()
 		}
@@ -297,5 +292,5 @@ func (s *stationSummary) addTemp(temp int64) {
 }
 
 func (s *stationSummary) summarize() string {
-	return fmt.Sprintf("%s/%s/%s", fmtTemp(s.min.Load()), divTemp(s.sum.Load(), s.count.Load()), fmtTemp(s.max.Load()))
+	return fmt.Sprintf("%s/%s/%s", temperature(s.min.Load()).string(), temperature(s.sum.Load()).div(s.count.Load()).string(), temperature(s.max.Load()).string())
 }
