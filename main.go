@@ -78,7 +78,7 @@ func processFile(filePath string) error {
 			readFile.Seek(0, io.SeekStart)
 		}
 
-		secReader := bufio.NewReader(io.NewSectionReader(readFile, start, stop))
+		secReader := bufio.NewReader(io.NewSectionReader(readFile, start, stop-start))
 
 		eg.Go(func() error {
 			return results.read(secReader)
