@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-
-	"github.com/dolthub/swiss"
 	//_ "net/http/pprof"
 )
 
@@ -85,13 +83,13 @@ func processFile(filePath string) error {
 }
 
 type results struct {
-	summaries [READER_WORKERS]*swiss.Map[uint64, *stationSummary]
+	summaries [READER_WORKERS]map[uint64]*stationSummary
 }
 
 func newResults() *results {
 	r := &results{}
 	for i := range r.summaries {
-		r.summaries[i] = swiss.NewMap[uint64, *stationSummary](512)
+		r.summaries[i] = make(map[uint64]*stationSummary)
 	}
 
 	return r
@@ -198,10 +196,10 @@ func (r *results) read(workerNum int, data []byte, off, n int64) {
 		}
 		temp := tempBuilder.temperature()
 
-		summary, ok := summaries.Get(nameHashSum)
+		summary, ok := summaries[nameHashSum]
 		if !ok {
 			summary = newStationSummary(string(name), temp)
-			summaries.Put(nameHashSum, summary)
+			summaries[nameHashSum] = summary
 		} else {
 			summary.addTemp(temp)
 		}
@@ -211,30 +209,28 @@ func (r *results) read(workerNum int, data []byte, off, n int64) {
 }
 
 func (r *results) summarize() string {
-	stations := swiss.NewMap[uint64, *stationSummary](uint32(r.summaries[0].Capacity()))
+	stations := make(map[uint64]*stationSummary, len(r.summaries[0]))
 	type stationIdx struct {
 		name string
 		idx  uint64
 	}
-	stationNames := make([]stationIdx, 0, r.summaries[0].Capacity())
+	stationNames := make([]stationIdx, 0, len(r.summaries[0]))
 
 	for _, summaries := range r.summaries {
-		summaries.Iter(func(idx uint64, summary *stationSummary) bool {
-			if total, ok := stations.Get(idx); ok {
+		for idx, summary := range summaries {
+			if total, ok := stations[idx]; ok {
 				total.combine(summary)
 			} else {
-				stations.Put(idx, summary)
+				stations[idx] = summary
 				stationNames = append(stationNames, stationIdx{summary.name, idx})
 			}
-			return false
-		})
+		}
 	}
 	slices.SortFunc(stationNames, func(a, b stationIdx) int { return strings.Compare(a.name, b.name) })
 
 	summariesTxt := "{"
 	for i, v := range stationNames {
-		summary, _ := stations.Get(v.idx)
-		summariesTxt += summary.summarize()
+		summariesTxt += stations[v.idx].summarize()
 		if i < len(stationNames)-1 {
 			summariesTxt += ", "
 		}
