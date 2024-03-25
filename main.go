@@ -14,9 +14,7 @@ import (
 )
 
 const (
-	READER_WORKERS          = 12
-	WRITER_WORKERS          = 12
-	RECORD_CHAN_BUFFER_SIZE = 256
+	READER_WORKERS = 16
 )
 
 func main() {
@@ -69,47 +67,27 @@ func processFile(filePath string) error {
 		return err
 	}
 
-	writerWg := sync.WaitGroup{}
-	for w := range WRITER_WORKERS {
-		writerWg.Add(1)
-		go func() {
-			results.write(w)
-			writerWg.Done()
-		}()
-	}
-
 	readerWg := sync.WaitGroup{}
 	for w := range READER_WORKERS {
 		readerWg.Add(1)
 		go func() {
-			results.read(data, secSize*int64(w), secSize)
+			results.read(w, data, secSize*int64(w), secSize)
 			readerWg.Done()
 		}()
 	}
 
 	readerWg.Wait()
 
-	for _, ch := range results.recordCh {
-		// Readers will read remaining values when channel is closed apparently
-		close(ch)
-	}
-
-	writerWg.Wait()
-
-	fmt.Print(results.summarize())
+	fmt.Println(results.summarize())
 	return err
 }
 
 type results struct {
-	recordCh  [WRITER_WORKERS]chan recordBytes
-	summaries [WRITER_WORKERS]map[uint64]*stationSummary
+	summaries [READER_WORKERS]map[uint64]*stationSummary
 }
 
 func newResults() *results {
 	r := &results{}
-	for i := range r.recordCh {
-		r.recordCh[i] = make(chan recordBytes, RECORD_CHAN_BUFFER_SIZE)
-	}
 	for i := range r.summaries {
 		r.summaries[i] = make(map[uint64]*stationSummary)
 	}
@@ -181,31 +159,10 @@ func newRecord(name []byte, nameHashSum uint64, temperature []byte) recordBytes 
 	return recordBytes{name, temperature, nameHashSum}
 }
 
-func (r *results) write(worker_number int) {
-	ch := r.recordCh[worker_number]
-	summaries := r.summaries[worker_number]
-	for record := range ch {
-		tempBuilder := newTemperatureBuilder()
-		for _, b := range record.temperature {
-			tempBuilder.addByte(b)
-		}
-		temp := tempBuilder.temperature()
-		summary, ok := summaries[record.nameHashSum]
-		if !ok {
-			summary = newStationSummary(string(record.name), temp)
-			summaries[record.nameHashSum] = summary
-		} else {
-			summary.addTemp(temp)
-		}
-		if summary.name != string(record.name) {
-			log.Printf("WTF! hash: %d, sum name: %s, name %s\n", record.nameHashSum, summary.name, string(record.name))
-		}
-	}
-}
-
 var HASH_SEED = maphash.MakeSeed()
 
-func (r *results) read(data []byte, off, n int64) {
+func (r *results) read(workerNum int, data []byte, off, n int64) {
+	summaries := r.summaries[workerNum]
 	i := off
 	end := i + n
 	if end > int64(len(data)) {
@@ -232,39 +189,55 @@ func (r *results) read(data []byte, off, n int64) {
 		i++
 
 		// Read the temperature value
-		tempStart := i
+		tempBuilder := newTemperatureBuilder()
 		for data[i] != '\n' {
+			tempBuilder.addByte(data[i])
 			i++
 		}
-		temp := data[tempStart:i]
+		temp := tempBuilder.temperature()
 
-		worker := nameHashSum % WRITER_WORKERS
-		r.recordCh[worker] <- newRecord(name, nameHashSum, temp)
+		summary, ok := summaries[nameHashSum]
+		if !ok {
+			summary = newStationSummary(string(name), temp)
+			summaries[nameHashSum] = summary
+		} else {
+			summary.addTemp(temp)
+		}
 
 		i++
 	}
 }
 
 func (r *results) summarize() string {
-	type stationResult struct {
-		result *stationSummary
-		name   string
+	stations := make(map[uint64]*stationSummary, len(r.summaries[0]))
+	type stationIdx struct {
+		name string
+		idx  uint64
 	}
+	stationNames := make([]stationIdx, 0, len(r.summaries[0]))
 
-	vals := make([]stationResult, 0)
 	for _, summaries := range r.summaries {
-		for _, summary := range summaries {
-			vals = append(vals, stationResult{name: summary.name, result: summary})
+		for idx, summary := range summaries {
+			if total, ok := stations[idx]; ok {
+				total.combine(summary)
+			} else {
+				stations[idx] = summary
+				stationNames = append(stationNames, stationIdx{summary.name, idx})
+			}
 		}
 	}
-	slices.SortFunc(vals, func(a, b stationResult) int { return strings.Compare(a.name, b.name) })
+	slices.SortFunc(stationNames, func(a, b stationIdx) int { return strings.Compare(a.name, b.name) })
 
-	summaries := make([]string, 0, len(vals))
-	for _, v := range vals {
-		summaries = append(summaries, fmt.Sprintf("%s=%s", v.name, v.result.summarize()))
+	summariesTxt := "{"
+	for i, v := range stationNames {
+		summariesTxt += stations[v.idx].summarize()
+		if i < len(stationNames)-1 {
+			summariesTxt += ", "
+		}
 	}
+	summariesTxt += "}"
 
-	return fmt.Sprintf("{%s}\n", strings.Join(summaries, ", "))
+	return summariesTxt
 }
 
 type stationSummary struct {
@@ -296,6 +269,17 @@ func (s *stationSummary) addTemp(temp temperature) {
 	}
 }
 
+func (s *stationSummary) combine(other *stationSummary) {
+	s.count += other.count
+	s.sum += other.sum
+	if other.min < s.min {
+		s.min = other.min
+	}
+	if other.max > s.max {
+		s.max = other.max
+	}
+}
+
 func (s *stationSummary) summarize() string {
-	return fmt.Sprintf("%s/%s/%s", s.min.string(), s.sum.div(s.count).string(), s.max.string())
+	return s.name + "=" + s.min.string() + "/" + s.sum.div(s.count).string() + "/" + s.max.string()
 }
