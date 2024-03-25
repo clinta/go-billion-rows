@@ -2,6 +2,7 @@
 
 SOURCE_SUFFIX=".full"
 #SOURCE_SUFFIX=".small"
+#SOURCE_SUFFIX=".medium"
 BRC_TEST_DIR="${HOME}/src/github.com/gunnarmorling/1brc"
 SOURCE_FILE="${BRC_TEST_DIR}/measurements.txt${SOURCE_SUFFIX}"
 SOURCE_RESULTS="${BRC_TEST_DIR}/results.txt${SOURCE_SUFFIX}"
